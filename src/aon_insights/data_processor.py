@@ -79,7 +79,6 @@ class DataProcessor:
         Returns:
             List of processed insight records, or None if nothing to process
         """
-        # Get unprocessed insights (where processed is NULL)
         unprocessed_df = self.spark.sql(f"""
             SELECT insights_id, insights_name, url
             FROM {self.insights_table}
@@ -94,7 +93,6 @@ class DataProcessor:
 
         logger.info(f"Found {len(rows)} unprocessed insights to download.")
 
-        # Create Volume directory for this batch
         os.makedirs(self.html_dir, exist_ok=True)
 
         records = []
@@ -107,10 +105,8 @@ class DataProcessor:
                 resp = requests.get(url, headers=HTML_HEADERS, timeout=30)
                 resp.raise_for_status()
 
-                # Parse with BeautifulSoup to get clean HTML
                 soup = BeautifulSoup(resp.text, "html.parser")
 
-                # Save HTML to Volume
                 html_path = f"{self.html_dir}/{insights_id}.html"
                 with open(html_path, "w", encoding="utf-8") as f:
                     f.write(str(soup))
@@ -127,7 +123,6 @@ class DataProcessor:
                     f"Failed to download {insights_id} ({url}): {e}"
                 )
 
-            # Avoid hitting rate limits
             time.sleep(1)
 
         if len(records) == 0:
@@ -138,7 +133,6 @@ class DataProcessor:
             f"Downloaded {len(records)} HTML files to {self.html_dir}"
         )
 
-        # Update aon_insights table with processed timestamp and volume_path
         update_schema = T.StructType([
             T.StructField("insights_id", T.StringType(), False),
             T.StructField("volume_path", T.StringType(), True),
@@ -178,7 +172,6 @@ class DataProcessor:
             )
         """)
 
-        # Read HTML files from Volume
         processed_df = self.spark.sql(f"""
             SELECT insights_id, volume_path
             FROM {self.insights_table}
@@ -203,15 +196,12 @@ class DataProcessor:
 
                 soup = BeautifulSoup(html_content, "html.parser")
 
-                # Extract from article body sections only (column-content),
-                # skipping carousels, sidebar, navigation, etc.
                 content_sections = soup.find_all(
                     "section", class_="column-content"
                 )
 
                 elements = []
                 for section in content_sections:
-                    # Skip disclaimer/legal boilerplate
                     if section.find(
                         "div", class_="disclaimer-block__block"
                     ):
@@ -280,7 +270,6 @@ class DataProcessor:
         parsed_dict = json.loads(parsed_content_json)
         elements = parsed_dict.get("document", {}).get("elements", [])
 
-        # Collect all text content in order
         texts = []
         for element in elements:
             if element.get("type") == "text":
@@ -291,7 +280,6 @@ class DataProcessor:
         if not texts:
             return []
 
-        # Merge into larger chunks
         chunks = []
         current_chunk = []
         current_len = 0
@@ -299,12 +287,10 @@ class DataProcessor:
         for text in texts:
             text_len = len(text)
 
-            # If adding this text exceeds the limit, finalize the current chunk
             if current_len > 0 and current_len + text_len + 1 > max_chunk_chars:
                 chunk_text = "\n".join(current_chunk)
                 chunks.append((str(len(chunks)), chunk_text))
 
-                # Start next chunk with overlap from the end of the previous
                 overlap_text = chunk_text[-overlap_chars:] if len(chunk_text) > overlap_chars else ""
                 current_chunk = [overlap_text, text] if overlap_text else [text]
                 current_len = len(overlap_text) + text_len + 1
@@ -312,7 +298,6 @@ class DataProcessor:
                 current_chunk.append(text)
                 current_len += text_len + 1
 
-        # Don't forget the last chunk
         if current_chunk:
             chunks.append((str(len(chunks)), "\n".join(current_chunk)))
 
@@ -329,13 +314,8 @@ class DataProcessor:
         Returns:
             Cleaned text content
         """
-        # Fix hyphenation across line breaks
         t = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", text)
-
-        # Collapse internal newlines into spaces
         t = re.sub(r"\s*\n\s*", " ", t)
-
-        # Collapse repeated whitespace
         t = re.sub(r"\s+", " ", t)
 
         return t.strip()
@@ -354,7 +334,6 @@ class DataProcessor:
             f"processed = '{self.end}'"
         )
 
-        # Define schema for the extracted chunks
         chunk_schema = ArrayType(
             StructType([
                 StructField("chunk_id", StringType(), True),
@@ -365,7 +344,6 @@ class DataProcessor:
         extract_chunks_udf = udf(self._extract_chunks, chunk_schema)
         clean_chunk_udf = udf(self._clean_chunk, StringType())
 
-        # Get metadata from aon_insights table
         metadata_df = self.spark.table(self.insights_table).select(
             col("insights_id"),
             col("insights_name"),
@@ -375,7 +353,6 @@ class DataProcessor:
             col("url"),
         )
 
-        # Create the transformed dataframe
         chunks_df = (
             df.withColumn(
                 "chunks", extract_chunks_udf(col("parsed_content"))
@@ -392,14 +369,12 @@ class DataProcessor:
             .join(metadata_df, "insights_id", "left")
         )
 
-        # Write to table
         aon_chunks_table = (
             f"{self.catalog}.{self.schema}.aon_chunks_table"
         )
         chunks_df.write.mode("append").saveAsTable(aon_chunks_table)
         logger.info(f"Saved chunks to {aon_chunks_table}")
 
-        # Enable Change Data Feed
         self.spark.sql(f"""
             ALTER TABLE {aon_chunks_table}
             SET TBLPROPERTIES (delta.enableChangeDataFeed = true)
@@ -410,17 +385,12 @@ class DataProcessor:
         """
         Complete workflow: download HTML, parse content, and process chunks.
         """
-        # Step 1: Download HTML from insight URLs and store in Volume
         records = self.download_and_store_html()
 
         if records is None:
             logger.info("No new insights to process. Exiting.")
             return
 
-        # Step 2: Parse HTML content to extract text
         self.parse_html_content()
-        logger.info("Parsed HTML documents.")
-
-        # Step 3: Process chunks
         self.process_chunks()
         logger.info("Processing complete!")

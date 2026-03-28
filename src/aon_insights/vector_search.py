@@ -1,5 +1,6 @@
-"""Vector search management for arxiv papers."""
+"""Vector search management for Aon Insights."""
 
+import time
 from typing import Any
 
 from databricks.sdk import WorkspaceClient
@@ -34,7 +35,6 @@ class VectorSearchManager:
         self.schema = config.schema
         self.usage_policy_id = usage_policy_id
 
-        # Get credentials from WorkspaceClient for authentication
         w = WorkspaceClient()
         self.client = VectorSearchClient(
             workspace_url=w.config.host,
@@ -70,7 +70,6 @@ class VectorSearchManager:
         """
         self.create_endpoint_if_not_exists()
 
-        # Try to get existing index
         try:
             index = self.client.get_index(index_name=self.index_name)
             logger.info(f"✓ Vector search index exists: {self.index_name}")
@@ -78,7 +77,6 @@ class VectorSearchManager:
         except Exception:
             logger.info(f"Index {self.index_name} not found, will create it")
 
-        # Try to create the index
         try:
             index = self.client.create_delta_sync_index(
                 endpoint_name=self.endpoint_name,
@@ -95,13 +93,36 @@ class VectorSearchManager:
         except Exception as e:
             if "RESOURCE_ALREADY_EXISTS" not in str(e):
                 raise
-            # Index exists but get_index failed earlier (transient) — retry
             logger.info(f"✓ Vector search index exists: {self.index_name}")
             return self.client.get_index(index_name=self.index_name)
 
-    def sync_index(self) -> None:
-        """Sync the vector search index with the source table."""
+    def sync_index(self, timeout_minutes: int = 15) -> None:
+        """Sync the vector search index with the source table.
+        Waits for the index to be ready before triggering sync.
+        """
         index = self.create_or_get_index()
+
+        deadline = time.time() + timeout_minutes * 60
+        while time.time() < deadline:
+            status = index.describe()
+            index_status = status.get("status", {})
+            ready = index_status.get("ready", False)
+            detailed_state = index_status.get("detailed_state", "UNKNOWN")
+
+            if ready:
+                break
+
+            logger.info(
+                f"Index not ready (state: {detailed_state}). "
+                f"Waiting 30s..."
+            )
+            time.sleep(30)
+        else:
+            raise TimeoutError(
+                f"Index {self.index_name} not ready after "
+                f"{timeout_minutes} minutes"
+            )
+
         logger.info(f"Syncing vector search index: {self.index_name}")
         index.sync()
         logger.info("✓ Index sync triggered")
