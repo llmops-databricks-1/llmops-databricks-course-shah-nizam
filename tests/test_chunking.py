@@ -6,7 +6,9 @@ import requests
 from bs4 import BeautifulSoup
 
 URL = "https://www.aon.com/en/insights/articles/property-risk-in-natural-resources-the-shift-from-severity-to-duration"
-HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+}
 
 
 def fetch_soup(url):
@@ -26,7 +28,9 @@ def extract_elements_before(soup):
     for idx, tag in enumerate(content_area.find_all(["h1", "h2", "h3", "h4", "p", "li"])):
         text = tag.get_text(strip=True)
         if text and len(text) > 10:
-            elements.append({"type": "text", "id": str(idx), "content": text, "tag": tag.name})
+            elements.append(
+                {"type": "text", "id": str(idx), "content": text, "tag": tag.name}
+            )
     return elements
 
 
@@ -43,10 +47,17 @@ def extract_elements_after(soup):
         # Skip disclaimer/legal boilerplate sections
         if section.find("div", class_="disclaimer-block__block"):
             continue
-        for idx, tag in enumerate(section.find_all(["h1", "h2", "h3", "h4", "p", "li"])):
+        for tag in section.find_all(["h1", "h2", "h3", "h4", "p", "li"]):
             text = tag.get_text(strip=True)
             if text and len(text) > 10:
-                elements.append({"type": "text", "id": str(len(elements)), "content": text, "tag": tag.name})
+                elements.append(
+                    {
+                        "type": "text",
+                        "id": str(len(elements)),
+                        "content": text,
+                        "tag": tag.name,
+                    }
+                )
     return elements
 
 
@@ -68,7 +79,9 @@ def merge_chunks(elements, max_chunk_chars=2000, overlap_chars=200):
         if current_len > 0 and current_len + text_len + 1 > max_chunk_chars:
             chunk_text = "\n".join(current_chunk)
             chunks.append(chunk_text)
-            overlap_text = chunk_text[-overlap_chars:] if len(chunk_text) > overlap_chars else ""
+            overlap_text = (
+                chunk_text[-overlap_chars:] if len(chunk_text) > overlap_chars else ""
+            )
             current_chunk = [overlap_text, text] if overlap_text else [text]
             current_len = len(overlap_text) + text_len + 1
         else:
@@ -109,7 +122,9 @@ if __name__ == "__main__":
     print()
     print("--- Raw Elements ---")
     for i, el in enumerate(after_elements):
-        preview = el["content"][:120] + "..." if len(el["content"]) > 120 else el["content"]
+        preview = (
+            el["content"][:120] + "..." if len(el["content"]) > 120 else el["content"]
+        )
         print(f"  [{i}] <{el['tag']}> ({len(el['content'])} chars): {preview}")
     print()
     for i, chunk in enumerate(after_chunks):

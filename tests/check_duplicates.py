@@ -45,7 +45,8 @@ while True:
         "wt": "json",
     }
     r = requests.get(
-        solr_url, params=params,
+        solr_url,
+        params=params,
         headers={"Authorization": f"Token {token}"},
         timeout=30,
     )
@@ -62,13 +63,15 @@ while True:
         full_url = BASE_URL + page_url
         iid = hashlib.md5(full_url.encode()).hexdigest()[:12]
         if iid == TARGET_ID:
-            matches.append({
-                "title": title,
-                "url": full_url,
-                "page_url_raw": page_url,
-                "published": doc.get("publish_date_tdt"),
-                "type": doc.get("content_type_tag_string_cf_s"),
-            })
+            matches.append(
+                {
+                    "title": title,
+                    "url": full_url,
+                    "page_url_raw": page_url,
+                    "published": doc.get("publish_date_tdt"),
+                    "type": doc.get("content_type_tag_string_cf_s"),
+                }
+            )
 
     start += PAGE_SIZE
     if start >= num_found:
@@ -77,7 +80,7 @@ while True:
 print(f"Total docs in Solr: {num_found}")
 print(f"Docs matching insights_id={TARGET_ID}: {len(matches)}\n")
 for i, m in enumerate(matches):
-    print(f"Match {i+1}:")
+    print(f"Match {i + 1}:")
     for k, v in m.items():
         print(f"  {k}: {v}")
     print()

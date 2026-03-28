@@ -16,7 +16,7 @@
 from loguru import logger
 from pyspark.sql import SparkSession
 
-from aon_insights.config import load_config, get_env
+from aon_insights.config import get_env, load_config
 from aon_insights.data_processor import DataProcessor
 from aon_insights.vector_search import VectorSearchManager
 

@@ -57,6 +57,7 @@ pythonpath = ["."]
 [tool.ruff]
 line-length = 90
 
+[tool.ruff.lint]
 select = [
     "F",    # pyflakes rules
     "E",    # pycodestyle error rules
@@ -67,7 +68,7 @@ select = [
     "SIM",  # flake8-simplify rules
     "ERA",  # eradicate rules
     "C",    # pylint convention rules
-    "ANN"   # flake8-annotations rules
+    "ANN",  # flake8-annotations rules
 ]
 
 ignore = [
@@ -76,9 +77,19 @@ ignore = [
     "D213",   # multi-line-summary-second-line
     "C901",   # too complex
     "ERA001", # commented out code
-    "ANN204",
-    "ANN102",
-    "ANN101"
+    "ANN204", # Missing return type annotation for special method
+]
+
+[tool.ruff.lint.per-file-ignores]
+"notebooks/*.py" = [
+    "E501",   # Line too long — MAGIC markdown lines can't be wrapped
+    "E402",   # Module import not at top — notebook cells are separate blocks
+    "F821",   # Undefined name — Databricks builtins (display, dbutils, spark)
+    "ANN",    # Missing type annotations — notebook code is exploratory
+    "B905",   # zip() without strict= — not critical in notebooks
+]
+"tests/*.py" = [
+    "ANN",    # Missing type annotations — test utility scripts
 ]
 
 [tool.ruff.format]

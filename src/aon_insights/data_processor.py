@@ -23,7 +23,6 @@ from pyspark.sql import types as T
 from pyspark.sql.functions import (
     col,
     concat_ws,
-    current_timestamp,
     explode,
     lit,
     udf,
@@ -111,17 +110,17 @@ class DataProcessor:
                 with open(html_path, "w", encoding="utf-8") as f:
                     f.write(str(soup))
 
-                records.append({
-                    "insights_id": insights_id,
-                    "volume_path": html_path,
-                })
+                records.append(
+                    {
+                        "insights_id": insights_id,
+                        "volume_path": html_path,
+                    }
+                )
 
                 logger.info(f"Downloaded: {insights_name}")
 
             except Exception as e:
-                logger.warning(
-                    f"Failed to download {insights_id} ({url}): {e}"
-                )
+                logger.warning(f"Failed to download {insights_id} ({url}): {e}")
 
             time.sleep(1)
 
@@ -129,18 +128,17 @@ class DataProcessor:
             logger.info("No HTML files were successfully downloaded.")
             return None
 
-        logger.info(
-            f"Downloaded {len(records)} HTML files to {self.html_dir}"
+        logger.info(f"Downloaded {len(records)} HTML files to {self.html_dir}")
+
+        update_schema = T.StructType(
+            [
+                T.StructField("insights_id", T.StringType(), False),
+                T.StructField("volume_path", T.StringType(), True),
+            ]
         )
 
-        update_schema = T.StructType([
-            T.StructField("insights_id", T.StringType(), False),
-            T.StructField("volume_path", T.StringType(), True),
-        ])
-
-        update_df = (
-            self.spark.createDataFrame(records, schema=update_schema)
-            .withColumn("processed", lit(self.end))
+        update_df = self.spark.createDataFrame(records, schema=update_schema).withColumn(
+            "processed", lit(self.end)
         )
 
         update_df.createOrReplaceTempView("processed_insights")
@@ -153,9 +151,7 @@ class DataProcessor:
                 target.volume_path = source.volume_path
         """)
 
-        logger.info(
-            f"Updated {len(records)} records in {self.insights_table}"
-        )
+        logger.info(f"Updated {len(records)} records in {self.insights_table}")
         return records
 
     def parse_html_content(self) -> None:
@@ -191,58 +187,54 @@ class DataProcessor:
             volume_path = row["volume_path"]
 
             try:
-                with open(volume_path, "r", encoding="utf-8") as f:
+                with open(volume_path, encoding="utf-8") as f:
                     html_content = f.read()
 
                 soup = BeautifulSoup(html_content, "html.parser")
 
-                content_sections = soup.find_all(
-                    "section", class_="column-content"
-                )
+                content_sections = soup.find_all("section", class_="column-content")
 
                 elements = []
                 for section in content_sections:
-                    if section.find(
-                        "div", class_="disclaimer-block__block"
-                    ):
+                    if section.find("div", class_="disclaimer-block__block"):
                         continue
-                    for idx, tag in enumerate(
-                        section.find_all(
-                            ["h1", "h2", "h3", "h4", "p", "li"]
-                        )
-                    ):
+                    for tag in section.find_all(["h1", "h2", "h3", "h4", "p", "li"]):
                         text = tag.get_text(strip=True)
                         if text and len(text) > 10:
-                            elements.append({
-                                "type": "text",
-                                "id": str(len(elements)),
-                                "content": text,
-                                "tag": tag.name,
-                            })
+                            elements.append(
+                                {
+                                    "type": "text",
+                                    "id": str(len(elements)),
+                                    "content": text,
+                                    "tag": tag.name,
+                                }
+                            )
 
                 parsed_json = json.dumps({"document": {"elements": elements}})
 
-                parsed_records.append({
-                    "insights_id": insights_id,
-                    "path": volume_path,
-                    "parsed_content": parsed_json,
-                    "processed": self.end,
-                })
+                parsed_records.append(
+                    {
+                        "insights_id": insights_id,
+                        "path": volume_path,
+                        "parsed_content": parsed_json,
+                        "processed": self.end,
+                    }
+                )
 
             except Exception as e:
                 logger.warning(f"Failed to parse {volume_path}: {e}")
 
         if parsed_records:
-            schema = T.StructType([
-                T.StructField("insights_id", T.StringType(), False),
-                T.StructField("path", T.StringType(), True),
-                T.StructField("parsed_content", T.StringType(), True),
-                T.StructField("processed", T.StringType(), True),
-            ])
-
-            parsed_df = self.spark.createDataFrame(
-                parsed_records, schema=schema
+            schema = T.StructType(
+                [
+                    T.StructField("insights_id", T.StringType(), False),
+                    T.StructField("path", T.StringType(), True),
+                    T.StructField("parsed_content", T.StringType(), True),
+                    T.StructField("processed", T.StringType(), True),
+                ]
             )
+
+            parsed_df = self.spark.createDataFrame(parsed_records, schema=schema)
             parsed_df.write.mode("append").saveAsTable(self.parsed_table)
             logger.info(
                 f"Parsed {len(parsed_records)} HTML files "
@@ -291,7 +283,9 @@ class DataProcessor:
                 chunk_text = "\n".join(current_chunk)
                 chunks.append((str(len(chunks)), chunk_text))
 
-                overlap_text = chunk_text[-overlap_chars:] if len(chunk_text) > overlap_chars else ""
+                overlap_text = (
+                    chunk_text[-overlap_chars:] if len(chunk_text) > overlap_chars else ""
+                )
                 current_chunk = [overlap_text, text] if overlap_text else [text]
                 current_len = len(overlap_text) + text_len + 1
             else:
@@ -326,19 +320,18 @@ class DataProcessor:
         Reads from parsed HTML table and saves to aon_chunks_table.
         """
         logger.info(
-            f"Processing parsed documents from "
-            f"{self.parsed_table} for batch {self.end}"
+            f"Processing parsed documents from {self.parsed_table} for batch {self.end}"
         )
 
-        df = self.spark.table(self.parsed_table).where(
-            f"processed = '{self.end}'"
-        )
+        df = self.spark.table(self.parsed_table).where(f"processed = '{self.end}'")
 
         chunk_schema = ArrayType(
-            StructType([
-                StructField("chunk_id", StringType(), True),
-                StructField("content", StringType(), True),
-            ])
+            StructType(
+                [
+                    StructField("chunk_id", StringType(), True),
+                    StructField("content", StringType(), True),
+                ]
+            )
         )
 
         extract_chunks_udf = udf(self._extract_chunks, chunk_schema)
@@ -354,24 +347,18 @@ class DataProcessor:
         )
 
         chunks_df = (
-            df.withColumn(
-                "chunks", extract_chunks_udf(col("parsed_content"))
-            )
+            df.withColumn("chunks", extract_chunks_udf(col("parsed_content")))
             .withColumn("chunk", explode(col("chunks")))
             .select(
                 col("insights_id"),
                 col("chunk.chunk_id").alias("chunk_id"),
                 clean_chunk_udf(col("chunk.content")).alias("text"),
-                concat_ws(
-                    "_", col("insights_id"), col("chunk.chunk_id")
-                ).alias("id"),
+                concat_ws("_", col("insights_id"), col("chunk.chunk_id")).alias("id"),
             )
             .join(metadata_df, "insights_id", "left")
         )
 
-        aon_chunks_table = (
-            f"{self.catalog}.{self.schema}.aon_chunks_table"
-        )
+        aon_chunks_table = f"{self.catalog}.{self.schema}.aon_chunks_table"
         chunks_df.write.mode("append").saveAsTable(aon_chunks_table)
         logger.info(f"Saved chunks to {aon_chunks_table}")
 

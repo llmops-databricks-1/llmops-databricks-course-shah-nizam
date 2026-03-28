@@ -1,9 +1,9 @@
 # Databricks notebook source
 
-from datetime import datetime
 import hashlib
 import re
 import time
+from datetime import datetime
 
 import requests
 from bs4 import BeautifulSoup
@@ -62,12 +62,8 @@ def extract_solr_config(soup: BeautifulSoup) -> dict:
         if "searchcloud" not in text.lower():
             continue
 
-        url_match = re.search(
-            r"url\s*:\s*[\"'](https://searchcloud[^\"']+)[\"']", text
-        )
-        token_match = re.search(
-            r"authentication\s*:\s*[\"']([a-f0-9]{40})[\"']", text
-        )
+        url_match = re.search(r"url\s*:\s*[\"'](https://searchcloud[^\"']+)[\"']", text)
+        token_match = re.search(r"authentication\s*:\s*[\"']([a-f0-9]{40})[\"']", text)
 
         if url_match and token_match:
             token = token_match.group(1)
@@ -91,7 +87,9 @@ def _parse_solr_date(date_str: str | None) -> str | None:
     if not date_str:
         return None
     try:
-        return datetime.fromisoformat(date_str.replace("Z", "+00:00")).strftime("%Y-%m-%d")
+        return datetime.fromisoformat(date_str.replace("Z", "+00:00")).strftime(
+            "%Y-%m-%d"
+        )
     except ValueError:
         return None
 
@@ -137,8 +135,10 @@ def fetch_all_aon_insights() -> list[dict]:
         }
 
         resp = requests.get(
-            solr_cfg["url"], params=params,
-            headers=solr_cfg["headers"], timeout=30,
+            solr_cfg["url"],
+            params=params,
+            headers=solr_cfg["headers"],
+            timeout=30,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -162,12 +162,10 @@ def fetch_all_aon_insights() -> list[dict]:
 
             # Extract topic names from "guid|Name" entries
             raw_topics = doc.get("topic_tag_cf_sm", [])
-            topic_names = [
-                entry.split("|", 1)[1]
-                for entry in raw_topics
-                if "|" in entry
-            ]
-            topics_str = ", ".join(sorted(topic_names)) if topic_names else "Uncategorized"
+            topic_names = [entry.split("|", 1)[1] for entry in raw_topics if "|" in entry]
+            topics_str = (
+                ", ".join(sorted(topic_names)) if topic_names else "Uncategorized"
+            )
 
             description = doc.get("shortdescription_t", "")
 
@@ -178,18 +176,20 @@ def fetch_all_aon_insights() -> list[dict]:
                 continue
             seen_ids.add(insights_id)
 
-            insights.append({
-                "insights_id": insights_id,
-                "insights_name": title,
-                "description": description,
-                "insights_type": content_type,
-                "topic": topics_str,
-                "published_date": _parse_solr_date(doc.get("publish_date_tdt")),
-                "url": full_url,
-                "ingestion_timestamp": now,
-                "processed": None,
-                "volume_path": None
-            })
+            insights.append(
+                {
+                    "insights_id": insights_id,
+                    "insights_name": title,
+                    "description": description,
+                    "insights_type": content_type,
+                    "topic": topics_str,
+                    "published_date": _parse_solr_date(doc.get("publish_date_tdt")),
+                    "url": full_url,
+                    "ingestion_timestamp": now,
+                    "processed": None,
+                    "volume_path": None,
+                }
+            )
 
         start += PAGE_SIZE
         if start >= num_found:
@@ -206,18 +206,20 @@ insights = fetch_all_aon_insights()
 # COMMAND ----------
 # Create DataFrame
 
-schema = StructType([
-    StructField("insights_id", StringType(), False),
-    StructField("insights_name", StringType(), False),
-    StructField("description", StringType(), True),
-    StructField("insights_type", StringType(), False),
-    StructField("topic", StringType(), False),
-    StructField("published_date", StringType(), True),
-    StructField("url", StringType(), False),
-    StructField("ingestion_timestamp", StringType(), True),
-    StructField("processed", StringType(), True),
-    StructField("volume_path", StringType(), True)
-])
+schema = StructType(
+    [
+        StructField("insights_id", StringType(), False),
+        StructField("insights_name", StringType(), False),
+        StructField("description", StringType(), True),
+        StructField("insights_type", StringType(), False),
+        StructField("topic", StringType(), False),
+        StructField("published_date", StringType(), True),
+        StructField("url", StringType(), False),
+        StructField("ingestion_timestamp", StringType(), True),
+        StructField("processed", StringType(), True),
+        StructField("volume_path", StringType(), True),
+    ]
+)
 
 df = spark.createDataFrame(insights, schema=schema)
 
@@ -271,7 +273,9 @@ logger.info("Schema:")
 insights_df.printSchema()
 
 logger.info("Sample records:")
-insights_df.select("insights_id", "insights_name", "url", "published_date").show(5, truncate=60)
+insights_df.select("insights_id", "insights_name", "url", "published_date").show(
+    5, truncate=60
+)
 
 # COMMAND ----------
 # Data Statistics
@@ -280,6 +284,6 @@ logger.info("Total unique insights:")
 insights_df.select("insights_id").distinct().count()
 
 logger.info("Most recent ingestions:")
-insights_df.select("insights_name", "url", "ingestion_timestamp") \
-    .orderBy("ingestion_timestamp", ascending=False) \
-    .show(5, truncate=60)
+insights_df.select("insights_name", "url", "ingestion_timestamp").orderBy(
+    "ingestion_timestamp", ascending=False
+).show(5, truncate=60)
