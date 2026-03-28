@@ -1,11 +1,11 @@
 """
-arXiv API
-   ↓ (download_and_store_papers)
-PDFs in Volume + arxiv_papers table
-   ↓ (parse_pdfs_with_ai)
-ai_parsed_docs_table (JSON)
+aon_insights table (URLs)
+   ↓ (download_and_store_html)
+HTML in Volume + aon_insights table updated (processed, volume_path)
+   ↓ (parse_html_content)
+aon_parsed_html_table (extracted text)
    ↓ (process_chunks)
-arxiv_chunks_table (clean text + metadata)
+aon_chunks_table (clean text + metadata)
    ↓ (VectorSearchManager - separate class) (2.4 notebook)
 Vector Search Index (embeddings)
 """
@@ -15,7 +15,8 @@ import os
 import re
 import time
 
-import arxiv
+import requests
+from bs4 import BeautifulSoup
 from loguru import logger
 from pyspark.sql import SparkSession
 from pyspark.sql import types as T
@@ -24,19 +25,28 @@ from pyspark.sql.functions import (
     concat_ws,
     current_timestamp,
     explode,
+    lit,
     udf,
 )
 from pyspark.sql.types import ArrayType, StringType, StructField, StructType
 
-from arxiv_curator.config import ProjectConfig
+from aon_insights.config import ProjectConfig
+
+HTML_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
+}
 
 
 class DataProcessor:
     """
     DataProcessor handles the complete workflow of:
-    - Downloading papers from arXiv
-    - Storing paper metadata
-    - Parsing PDFs with ai_parse_document
+    - Reading insight URLs from the aon_insights table
+    - Downloading HTML content with BeautifulSoup
+    - Storing HTML files in a Unity Catalog Volume
     - Extracting and cleaning text chunks
     - Saving chunks to Delta tables
     """
@@ -56,222 +66,270 @@ class DataProcessor:
         self.volume = config.volume
 
         self.end = time.strftime("%Y%m%d%H%M", time.gmtime())
-        self.pdf_dir = f"/Volumes/{self.catalog}/{self.schema}/{self.volume}/{self.end}"
-        os.makedirs(self.pdf_dir, exist_ok=True)
-        self.papers_table = f"{self.catalog}.{self.schema}.aon_insights"
-        self.parsed_table = f"{self.catalog}.{self.schema}.ai_parsed_docs_table"
+        self.html_dir = f"/Volumes/{self.catalog}/{self.schema}/{self.volume}/{self.end}"
+        self.insights_table = f"{self.catalog}.{self.schema}.aon_insights"
+        self.parsed_table = f"{self.catalog}.{self.schema}.aon_parsed_html_table"
 
-    def _get_range_start(self) -> str:
+    def download_and_store_html(self) -> list[dict] | None:
         """
-        Get start time range for arxiv paper search.
-        If arxiv_papers table exists, uses max(processed) as start.
-        Otherwise, uses 3 days ago as start.
+        Read unprocessed URLs from aon_insights table,
+        fetch HTML content using BeautifulSoup, and store
+        HTML files in the Volume.
 
         Returns:
-            start string in "YYYYMMDDHHMM" format
+            List of processed insight records, or None if nothing to process
         """
+        # Get unprocessed insights (where processed is NULL)
+        unprocessed_df = self.spark.sql(f"""
+            SELECT insights_id, insights_name, url
+            FROM {self.insights_table}
+            WHERE processed IS NULL
+        """)
 
-        if self.spark.catalog.tableExists(self.papers_table):
-            result = self.spark.sql(f"""
-                SELECT max(processed)
-                FROM {self.papers_table}
-            """).collect()
-            start = str(result[0][0])
-            logger.info(
-                f"Found existing arxiv_papers table. Starting from: {start}"
-            )
-        else:
-            start = time.strftime(
-                "%Y%m%d%H%M", time.gmtime(time.time() - 24 * 3600 * 3)
-            )
-            logger.info(
-                f"No existing arxiv_papers table. "
-                f"Starting from 3 days ago: {start}"
-            )
-        return start
+        rows = unprocessed_df.collect()
 
-    def download_and_store_papers(
-        self,
-    ) -> list[dict] | None:
-        """
-        Download papers from arxiv and store metadata
-        in arxiv_papers table.
-
-        Returns:
-            List of paper metadata dictionaries if papers were downloaded,
-            otherwise None
-        """
-        start = self._get_range_start()
-
-        # Search for papers in arxiv
-        client = arxiv.Client()
-        search = arxiv.Search(
-            query=f"cat:cs.AI AND submittedDate:[{start} TO {self.end}]"
-        )
-        papers = client.results(search)
-
-        # Download papers and collect metadata
-        records = []
-
-        for paper in papers:
-            paper_id = paper.get_short_id()
-            try:
-                paper.download_pdf(
-                    dirpath=self.pdf_dir, filename=f"{paper_id}.pdf"
-                )
-                # Collect metadata
-                records.append(
-                    {
-                        "arxiv_id": paper_id,
-                        "title": paper.title,
-                        "authors": [
-                            author.name for author in paper.authors
-                        ],
-                        "summary": paper.summary,
-                        "pdf_url": paper.pdf_url,
-                        "published": int(
-                            paper.published.strftime("%Y%m%d%H%M")
-                        ),
-                        "processed": int(self.end),
-                        "volume_path": f"{self.pdf_dir}/{paper_id}.pdf",
-                    }
-                )
-                break
-            except Exception:
-                logger.warning(
-                    f"Paper {paper_id} was not successfully processed."
-                )
-            # Avoid hitting API rate limits
-            time.sleep(3)
-
-        # Only process if we have records
-        if len(records) == 0:
-            logger.info("No new papers found.")
+        if len(rows) == 0:
+            logger.info("No unprocessed insights found.")
             return None
 
-        logger.info(f"Downloaded {len(records)} papers to {self.pdf_dir}")
+        logger.info(f"Found {len(rows)} unprocessed insights to download.")
 
-        # Create DataFrame and save to arxiv_papers table
-        schema = T.StructType(
-            [
-                T.StructField("arxiv_id", T.StringType(), False),
-                T.StructField("title", T.StringType(), True),
-                T.StructField("authors", T.ArrayType(T.StringType()), True),
-                T.StructField("summary", T.StringType(), True),
-                T.StructField("pdf_url", T.StringType(), True),
-                T.StructField("published", T.LongType(), True),
-                T.StructField("processed", T.LongType(), True),
-                T.StructField("volume_path", T.StringType(), True),
-            ]
-        )
+        # Create Volume directory for this batch
+        os.makedirs(self.html_dir, exist_ok=True)
 
-        metadata_df = self.spark.createDataFrame(
-            records, schema=schema).withColumn(
-            "ingest_ts", current_timestamp()
-        )
+        records = []
+        for row in rows:
+            insights_id = row["insights_id"]
+            url = row["url"]
+            insights_name = row["insights_name"]
 
-        # Create table if it doesn't exist
-        metadata_df.write.format("delta").mode("ignore").saveAsTable(
-            self.papers_table)
+            try:
+                resp = requests.get(url, headers=HTML_HEADERS, timeout=30)
+                resp.raise_for_status()
 
-        # MERGE to avoid duplicates based on arxiv_id
-        metadata_df.createOrReplaceTempView("new_papers")
-        self.spark.sql(f"""
-            MERGE INTO {self.papers_table} target
-            USING new_papers source
-            ON target.arxiv_id = source.arxiv_id
-            WHEN NOT MATCHED THEN INSERT (
-                arxiv_id, title, authors, summary, pdf_url,
-                published, processed, volume_path
-            ) VALUES (
-                source.arxiv_id, source.title, source.authors,
-                source.summary, source.pdf_url, source.published,
-                source.processed, source.volume_path
-            )
-        """)
+                # Parse with BeautifulSoup to get clean HTML
+                soup = BeautifulSoup(resp.text, "html.parser")
+
+                # Save HTML to Volume
+                html_path = f"{self.html_dir}/{insights_id}.html"
+                with open(html_path, "w", encoding="utf-8") as f:
+                    f.write(str(soup))
+
+                records.append({
+                    "insights_id": insights_id,
+                    "volume_path": html_path,
+                })
+
+                logger.info(f"Downloaded: {insights_name}")
+
+            except Exception as e:
+                logger.warning(
+                    f"Failed to download {insights_id} ({url}): {e}"
+                )
+
+            # Avoid hitting rate limits
+            time.sleep(1)
+
+        if len(records) == 0:
+            logger.info("No HTML files were successfully downloaded.")
+            return None
+
         logger.info(
-            f"Merged {len(records)} paper records into {self.papers_table}"
+            f"Downloaded {len(records)} HTML files to {self.html_dir}"
+        )
+
+        # Update aon_insights table with processed timestamp and volume_path
+        update_schema = T.StructType([
+            T.StructField("insights_id", T.StringType(), False),
+            T.StructField("volume_path", T.StringType(), True),
+        ])
+
+        update_df = (
+            self.spark.createDataFrame(records, schema=update_schema)
+            .withColumn("processed", lit(self.end))
+        )
+
+        update_df.createOrReplaceTempView("processed_insights")
+        self.spark.sql(f"""
+            MERGE INTO {self.insights_table} target
+            USING processed_insights source
+            ON target.insights_id = source.insights_id
+            WHEN MATCHED THEN UPDATE SET
+                target.processed = source.processed,
+                target.volume_path = source.volume_path
+        """)
+
+        logger.info(
+            f"Updated {len(records)} records in {self.insights_table}"
         )
         return records
 
-    def parse_pdfs_with_ai(self) -> None:
+    def parse_html_content(self) -> None:
         """
-        Parse PDFs using ai_parse_document and store in ai_parsed_docs table.
-
+        Parse stored HTML files to extract text content
+        and store in parsed HTML table.
         """
-
         self.spark.sql(f"""
             CREATE TABLE IF NOT EXISTS {self.parsed_table} (
+                insights_id STRING,
                 path STRING,
                 parsed_content STRING,
-                processed LONG
+                processed STRING
             )
         """)
 
-        self.spark.sql(f"""
-            INSERT INTO {self.parsed_table}
-            SELECT
-                path,
-                ai_parse_document(content) AS parsed_content,
-                {self.end} AS processed
-            FROM READ_FILES(
-                "{self.pdf_dir}",
-                format => 'binaryFile'
-            )
+        # Read HTML files from Volume
+        processed_df = self.spark.sql(f"""
+            SELECT insights_id, volume_path
+            FROM {self.insights_table}
+            WHERE processed = '{self.end}'
+              AND volume_path IS NOT NULL
         """)
 
-        logger.info(
-            f"Parsed PDFs from {self.pdf_dir} and saved to {self.parsed_table}"
-        )
+        rows = processed_df.collect()
+
+        if len(rows) == 0:
+            logger.info("No HTML files to parse for this batch.")
+            return
+
+        parsed_records = []
+        for row in rows:
+            insights_id = row["insights_id"]
+            volume_path = row["volume_path"]
+
+            try:
+                with open(volume_path, "r", encoding="utf-8") as f:
+                    html_content = f.read()
+
+                soup = BeautifulSoup(html_content, "html.parser")
+
+                # Extract from article body sections only (column-content),
+                # skipping carousels, sidebar, navigation, etc.
+                content_sections = soup.find_all(
+                    "section", class_="column-content"
+                )
+
+                elements = []
+                for section in content_sections:
+                    # Skip disclaimer/legal boilerplate
+                    if section.find(
+                        "div", class_="disclaimer-block__block"
+                    ):
+                        continue
+                    for idx, tag in enumerate(
+                        section.find_all(
+                            ["h1", "h2", "h3", "h4", "p", "li"]
+                        )
+                    ):
+                        text = tag.get_text(strip=True)
+                        if text and len(text) > 10:
+                            elements.append({
+                                "type": "text",
+                                "id": str(len(elements)),
+                                "content": text,
+                                "tag": tag.name,
+                            })
+
+                parsed_json = json.dumps({"document": {"elements": elements}})
+
+                parsed_records.append({
+                    "insights_id": insights_id,
+                    "path": volume_path,
+                    "parsed_content": parsed_json,
+                    "processed": self.end,
+                })
+
+            except Exception as e:
+                logger.warning(f"Failed to parse {volume_path}: {e}")
+
+        if parsed_records:
+            schema = T.StructType([
+                T.StructField("insights_id", T.StringType(), False),
+                T.StructField("path", T.StringType(), True),
+                T.StructField("parsed_content", T.StringType(), True),
+                T.StructField("processed", T.StringType(), True),
+            ])
+
+            parsed_df = self.spark.createDataFrame(
+                parsed_records, schema=schema
+            )
+            parsed_df.write.mode("append").saveAsTable(self.parsed_table)
+            logger.info(
+                f"Parsed {len(parsed_records)} HTML files "
+                f"and saved to {self.parsed_table}"
+            )
 
     @staticmethod
-    def _extract_chunks(parsed_content_json: str) -> list[tuple[str, str]]:
+    def _extract_chunks(
+        parsed_content_json: str,
+        max_chunk_chars: int = 2000,
+        overlap_chars: int = 200,
+    ) -> list[tuple[str, str]]:
         """
-        Extract chunks from parsed_content JSON.
+        Extract chunks from parsed_content JSON, merging adjacent
+        text elements into larger chunks of approximately max_chunk_chars.
 
         Args:
-            parsed_content_json: JSON string containing
-            parsed document structure
+            parsed_content_json: JSON string containing parsed document structure
+            max_chunk_chars: Target maximum characters per chunk (~512 tokens)
+            overlap_chars: Character overlap between consecutive chunks
 
         Returns:
             List of tuples containing (chunk_id, content)
         """
         parsed_dict = json.loads(parsed_content_json)
-        chunks = []
+        elements = parsed_dict.get("document", {}).get("elements", [])
 
-        for element in parsed_dict.get("document", {}).get("elements", []):
+        # Collect all text content in order
+        texts = []
+        for element in elements:
             if element.get("type") == "text":
-                chunk_id = element.get("id", "")
-                content = element.get("content", "")
-                chunks.append((chunk_id, content))
+                content = element.get("content", "").strip()
+                if content:
+                    texts.append(content)
+
+        if not texts:
+            return []
+
+        # Merge into larger chunks
+        chunks = []
+        current_chunk = []
+        current_len = 0
+
+        for text in texts:
+            text_len = len(text)
+
+            # If adding this text exceeds the limit, finalize the current chunk
+            if current_len > 0 and current_len + text_len + 1 > max_chunk_chars:
+                chunk_text = "\n".join(current_chunk)
+                chunks.append((str(len(chunks)), chunk_text))
+
+                # Start next chunk with overlap from the end of the previous
+                overlap_text = chunk_text[-overlap_chars:] if len(chunk_text) > overlap_chars else ""
+                current_chunk = [overlap_text, text] if overlap_text else [text]
+                current_len = len(overlap_text) + text_len + 1
+            else:
+                current_chunk.append(text)
+                current_len += text_len + 1
+
+        # Don't forget the last chunk
+        if current_chunk:
+            chunks.append((str(len(chunks)), "\n".join(current_chunk)))
 
         return chunks
 
     @staticmethod
-    def _extract_paper_id(path: str) -> str:
-        """
-        Extract paper ID from file path.
-
-        Args:
-            path: File path (e.g., "/path/to/paper_id.pdf")
-
-        Returns:
-            Paper ID extracted from the path
-        """
-        return path.replace(".pdf", "").split("/")[-1]
-
-    @staticmethod
     def _clean_chunk(text: str) -> str:
         """
-        Clean and normalize chunk text
+        Clean and normalize chunk text.
+
         Args:
             text: Raw text content
 
         Returns:
             Cleaned text content
         """
-        # Fix hyphenation across line breaks:
-        # "docu-\nments" => "documents"
+        # Fix hyphenation across line breaks
         t = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", text)
 
         # Collapse internal newlines into spaces
@@ -285,86 +343,83 @@ class DataProcessor:
     def process_chunks(self) -> None:
         """
         Process parsed documents to extract and clean chunks.
-        Reads from ai_parsed_docs table and saves to arxiv_chunks table.
+        Reads from parsed HTML table and saves to aon_chunks_table.
         """
         logger.info(
             f"Processing parsed documents from "
-            f"{self.parsed_table} for end date {self.end}"
+            f"{self.parsed_table} for batch {self.end}"
         )
 
         df = self.spark.table(self.parsed_table).where(
-            f"processed = {self.end}"
+            f"processed = '{self.end}'"
         )
 
         # Define schema for the extracted chunks
         chunk_schema = ArrayType(
-            StructType(
-                [
-                    StructField("chunk_id", StringType(), True),
-                    StructField("content", StringType(), True),
-                ]
-            )
+            StructType([
+                StructField("chunk_id", StringType(), True),
+                StructField("content", StringType(), True),
+            ])
         )
 
         extract_chunks_udf = udf(self._extract_chunks, chunk_schema)
-        extract_paper_id_udf = udf(self._extract_paper_id, StringType())
         clean_chunk_udf = udf(self._clean_chunk, StringType())
 
-        metadata_df = self.spark.table(self.papers_table).select(
-            col("arxiv_id"),
-            col("title"),
-            col("summary"),
-            concat_ws(", ", col("authors")).alias("authors"),
-            (col("published") / 100000000).cast("int").alias("year"),
-            ((col("published") % 100000000) / 1000000).cast("int").alias("month"),
-            ((col("published") % 1000000) / 10000).cast("int").alias("day"),
+        # Get metadata from aon_insights table
+        metadata_df = self.spark.table(self.insights_table).select(
+            col("insights_id"),
+            col("insights_name"),
+            col("insights_type"),
+            col("topic"),
+            col("published_date"),
+            col("url"),
         )
 
         # Create the transformed dataframe
         chunks_df = (
-            df.withColumn("arxiv_id", extract_paper_id_udf(col("path")))
-            .withColumn(
+            df.withColumn(
                 "chunks", extract_chunks_udf(col("parsed_content"))
             )
             .withColumn("chunk", explode(col("chunks")))
             .select(
-                col("arxiv_id"),
+                col("insights_id"),
                 col("chunk.chunk_id").alias("chunk_id"),
                 clean_chunk_udf(col("chunk.content")).alias("text"),
-                concat_ws("_", col("arxiv_id"), col("chunk.chunk_id")).alias(
-                    "id"
-                ),
+                concat_ws(
+                    "_", col("insights_id"), col("chunk.chunk_id")
+                ).alias("id"),
             )
-            .join(metadata_df, "arxiv_id", "left")
+            .join(metadata_df, "insights_id", "left")
         )
 
         # Write to table
-        arxiv_chunks_table = f"{self.catalog}.{self.schema}.arxiv_chunks_table"
-        chunks_df.write.mode("append").saveAsTable(arxiv_chunks_table)
-        logger.info(f"Saved chunks to {arxiv_chunks_table}")
+        aon_chunks_table = (
+            f"{self.catalog}.{self.schema}.aon_chunks_table"
+        )
+        chunks_df.write.mode("append").saveAsTable(aon_chunks_table)
+        logger.info(f"Saved chunks to {aon_chunks_table}")
 
         # Enable Change Data Feed
         self.spark.sql(f"""
-            ALTER TABLE {arxiv_chunks_table}
+            ALTER TABLE {aon_chunks_table}
             SET TBLPROPERTIES (delta.enableChangeDataFeed = true)
         """)
-        logger.info(f"Change Data Feed enabled for {arxiv_chunks_table}")
+        logger.info(f"Change Data Feed enabled for {aon_chunks_table}")
 
     def process_and_save(self) -> None:
         """
-        Complete workflow: download papers, parse PDFs, and process chunks.
+        Complete workflow: download HTML, parse content, and process chunks.
         """
-        # Step 1: Download papers and store metadata
-        records = self.download_and_store_papers()
+        # Step 1: Download HTML from insight URLs and store in Volume
+        records = self.download_and_store_html()
 
-        # Only continue if we have new papers
         if records is None:
-            logger.info("No new papers to process. Exiting.")
+            logger.info("No new insights to process. Exiting.")
             return
 
-        # Step 2: Parse PDFs with ai_parse_document
-        self.parse_pdfs_with_ai()
-        logger.info("Parsed documents.")
+        # Step 2: Parse HTML content to extract text
+        self.parse_html_content()
+        logger.info("Parsed HTML documents.")
 
         # Step 3: Process chunks
         self.process_chunks()

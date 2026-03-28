@@ -4,7 +4,7 @@
 dev:
   catalog: mlops_dev
   schema: shahniza
-  volume: arxiv_files
+  volume: aon_insights_files
   llm_endpoint: databricks-llama-4-maverick
   embedding_endpoint: databricks-gte-large-en
   warehouse_id: 7077f4cb0e616c62
@@ -15,7 +15,7 @@ dev:
 acc:
   catalog: mlops_dev
   schema: shahniza
-  volume: arxiv_files
+  volume: aon_insights_files
   llm_endpoint: databricks-meta-llama-3-1-70b-instruct
   embedding_endpoint: databricks-gte-large-en
   warehouse_id: 7077f4cb0e616c62
@@ -26,7 +26,7 @@ acc:
 prd:
   catalog: mlops_dev
   schema: shahniza
-  volume: arxiv_files
+  volume: aon_insights_files
   llm_endpoint: databricks-meta-llama-3-1-70b-instruct
   embedding_endpoint: databricks-gte-large-en
   warehouse_id: 7077f4cb0e616c62

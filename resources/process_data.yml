@@ -1,13 +1,13 @@
 resources:
   jobs:
     data-pipeline:
-      name: arxiv-data-pipeline
+      name: aon-insights-data-pipeline
       schedule:
         quartz_cron_expression: "0 0 6 * * ?"
         timezone_id: "Europe/Amsterdam"
         pause_status: ${var.schedule_pause_status}
       tags:
-        project_name: "arxiv-curator"
+        project_name: "aon-insights"
       environments:
         - environment_key: default
           spec:

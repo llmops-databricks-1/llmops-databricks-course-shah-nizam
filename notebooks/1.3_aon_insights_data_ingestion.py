@@ -3,6 +3,7 @@
 from datetime import datetime
 import hashlib
 import re
+import time
 
 import requests
 from bs4 import BeautifulSoup
@@ -29,120 +30,234 @@ spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
 logger.info(f"Schema {CATALOG}.{SCHEMA} ready")
 
 # COMMAND ----------
-# Fetch Aon Insights from https://www.aon.com/en/insights using BeautifulSoup
+# Fetch Aon Insights by Topic from https://www.aon.com/en/insights
+# Uses the underlying SearchStax Solr API for complete paginated results.
+# Each insight's topics are concatenated from the source data (topic_tag_cf_sm)
+# so no duplicates and no lost topic associations.
 
 BASE_URL = "https://www.aon.com"
 INSIGHTS_URL = f"{BASE_URL}/en/insights"
 
+HTML_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
+}
 
-def fetch_aon_insights(url: str = INSIGHTS_URL) -> list[dict]:
+PAGE_SIZE = 50  # Solr rows per request
+
+
+def extract_solr_config(soup: BeautifulSoup) -> dict:
     """
-    Scrape report titles and URLs from the Aon Insights page.
+    Extract the SearchStax Solr URL and auth token from the
+    page's embedded JavaScript CONFIGURATION block.
 
-    Args:
-        url: The Aon Insights page URL
+    Returns:
+        Dict with keys 'url', 'auth_token', and 'headers'
+    """
+    for script in soup.find_all("script"):
+        text = script.string or ""
+        if "searchcloud" not in text.lower():
+            continue
+
+        url_match = re.search(
+            r"url\s*:\s*[\"'](https://searchcloud[^\"']+)[\"']", text
+        )
+        token_match = re.search(
+            r"authentication\s*:\s*[\"']([a-f0-9]{40})[\"']", text
+        )
+
+        if url_match and token_match:
+            token = token_match.group(1)
+            return {
+                "url": url_match.group(1),
+                "auth_token": token,
+                "headers": {
+                    "User-Agent": "Mozilla/5.0",
+                    "Authorization": f"Token {token}",
+                },
+            }
+
+    raise RuntimeError(
+        "Could not extract Solr config from the Aon Insights page. "
+        "The page structure may have changed."
+    )
+
+
+def _parse_solr_date(date_str: str | None) -> str | None:
+    """Convert Solr datetime '2026-03-18T00:00:00Z' to 'YYYY-MM-DD'."""
+    if not date_str:
+        return None
+    try:
+        return datetime.fromisoformat(date_str.replace("Z", "+00:00")).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def fetch_all_aon_insights() -> list[dict]:
+    """
+    Fetch every Aon insight in a single paginated pass.
+    Topics are extracted from each document's topic_tag_cf_sm field
+    and concatenated with ', ' — so each URL appears exactly once.
 
     Returns:
         List of insight metadata dictionaries
     """
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        )
-    }
+    # Fetch page once — reuse for config extraction
+    print("Fetching Aon Insights page...")
+    resp = requests.get(INSIGHTS_URL, headers=HTML_HEADERS, timeout=30)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
 
-    response = requests.get(url, headers=headers, timeout=30)
-    response.raise_for_status()
+    solr_cfg = extract_solr_config(soup)
+    print(f"Solr endpoint: {solr_cfg['url']}")
 
-    soup = BeautifulSoup(response.text, "html.parser")
     now = datetime.now().isoformat()
-
     insights = []
-    seen_urls = set()
+    seen_ids = set()
+    start = 0
 
-    # Look for article/report links on the insights page
-    for link in soup.find_all("a", href=True):
-        href = link["href"]
-        title = link.get_text(strip=True)
+    while True:
+        params = {
+            "q": "*:*",
+            "fq": "page_url_cf_s:\\/en\\/insights\\/*",
+            "rows": PAGE_SIZE,
+            "start": start,
+            "sort": "publish_date_tdt desc",
+            "fl": (
+                "title_t,page_url_cf_s,"
+                "content_type_tag_string_cf_s,"
+                "topic_tag_cf_sm,"
+                "publish_date_tdt,"
+                "shortdescription_t"
+            ),
+            "wt": "json",
+        }
 
-        # Filter for insight/report links and skip empty titles
-        if not title or len(title) < 5:
-            continue
+        resp = requests.get(
+            solr_cfg["url"], params=params,
+            headers=solr_cfg["headers"], timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
 
-        # Build full URL
-        if href.startswith("/"):
-            full_url = BASE_URL + href
-        elif href.startswith("http"):
-            full_url = href
-        else:
-            continue
+        docs = data["response"]["docs"]
+        num_found = data["response"]["numFound"]
 
-        # Only keep links under /en/insights/ that look like report pages
-        if "/en/insights/" not in full_url:
-            continue
+        if start == 0:
+            print(f"Total insights in index: {num_found}")
 
-        # Deduplicate by URL
-        if full_url in seen_urls:
-            continue
-        seen_urls.add(full_url)
+        if not docs:
+            break
 
-        # Generate a stable ID from the URL
-        insights_id = hashlib.md5(full_url.encode()).hexdigest()[:12]
+        for doc in docs:
+            page_url = doc.get("page_url_cf_s", "")
+            title = doc.get("title_t", "")
+            content_type = doc.get("content_type_tag_string_cf_s", "Unknown")
 
-        # Try to extract a date/time from the page or link context
-        time_tag = link.find_parent().find("time") if link.find_parent() else None
-        time_value = time_tag.get("datetime", time_tag.get_text(strip=True)) if time_tag else None
+            if not page_url or not title:
+                continue
 
-        insights.append({
-            "insights_id": insights_id,
-            "insights_name": title,
-            "url": full_url,
-            "time": time_value,
-            "ingestion_timestamp": now,
-        })
+            # Extract topic names from "guid|Name" entries
+            raw_topics = doc.get("topic_tag_cf_sm", [])
+            topic_names = [
+                entry.split("|", 1)[1]
+                for entry in raw_topics
+                if "|" in entry
+            ]
+            topics_str = ", ".join(sorted(topic_names)) if topic_names else "Uncategorized"
 
+            description = doc.get("shortdescription_t", "")
+
+            full_url = BASE_URL + page_url
+            insights_id = hashlib.md5(full_url.encode()).hexdigest()[:12]
+
+            if insights_id in seen_ids:
+                continue
+            seen_ids.add(insights_id)
+
+            insights.append({
+                "insights_id": insights_id,
+                "insights_name": title,
+                "description": description,
+                "insights_type": content_type,
+                "topic": topics_str,
+                "published_date": _parse_solr_date(doc.get("publish_date_tdt")),
+                "url": full_url,
+                "ingestion_timestamp": now,
+                "processed": None,
+                "volume_path": None
+            })
+
+        start += PAGE_SIZE
+        if start >= num_found:
+            break
+        time.sleep(0.3)
+
+    print(f"Total unique insights collected: {len(insights)}")
     return insights
 
 
-logger.info("Fetching Aon Insights...")
-insights = fetch_aon_insights()
-logger.info(f"Fetched {len(insights)} insights")
-
-if insights:
-    logger.info("Sample insight:")
-    logger.info(f"  Name: {insights[0]['insights_name']}")
-    logger.info(f"  URL:  {insights[0]['url']}")
-    logger.info(f"  ID:   {insights[0]['insights_id']}")
+# Run the scraper
+insights = fetch_all_aon_insights()
 
 # COMMAND ----------
-# Create Delta Table in Unity Catalog
-# Store the Aon Insights metadata in a Delta table for downstream processing.
+# Create DataFrame
 
-# Define schema
 schema = StructType([
     StructField("insights_id", StringType(), False),
     StructField("insights_name", StringType(), False),
+    StructField("description", StringType(), True),
+    StructField("insights_type", StringType(), False),
+    StructField("topic", StringType(), False),
+    StructField("published_date", StringType(), True),
     StructField("url", StringType(), False),
-    StructField("time", StringType(), True),
     StructField("ingestion_timestamp", StringType(), True),
+    StructField("processed", StringType(), True),
+    StructField("volume_path", StringType(), True)
 ])
 
-# Create DataFrame
 df = spark.createDataFrame(insights, schema=schema)
 
-# Write to Delta table
+# Write to Delta table using MERGE (upsert on insights_id)
 table_path = f"{CATALOG}.{SCHEMA}.{TABLE_NAME}"
 
-df.write \
-    .format("delta") \
-    .mode("overwrite") \
-    .option("mergeSchema", "true") \
-    .saveAsTable(table_path)
+spark.sql(f"""
+    CREATE TABLE IF NOT EXISTS {table_path} (
+        insights_id STRING NOT NULL,
+        insights_name STRING,
+        description STRING,
+        insights_type STRING,
+        topic STRING,
+        published_date STRING,
+        url STRING,
+        ingestion_timestamp STRING,
+        processed STRING,
+        volume_path STRING
+    )
+""")
 
-logger.info(f"Created Delta table: {table_path}")
-logger.info(f"Records: {df.count()}")
+df.createOrReplaceTempView("new_insights")
+
+spark.sql(f"""
+    MERGE INTO {table_path} target
+    USING new_insights source
+    ON target.insights_id = source.insights_id
+    WHEN MATCHED THEN UPDATE SET
+        target.insights_name = source.insights_name,
+        target.description = source.description,
+        target.insights_type = source.insights_type,
+        target.topic = source.topic,
+        target.published_date = source.published_date,
+        target.url = source.url,
+        target.ingestion_timestamp = source.ingestion_timestamp
+    WHEN NOT MATCHED THEN INSERT *
+""")
+
+logger.info(f"Merged into Delta table: {table_path}")
+logger.info(f"Records: {spark.table(table_path).count()}")
 
 # COMMAND ----------
 # Verify the Data
@@ -156,7 +271,7 @@ logger.info("Schema:")
 insights_df.printSchema()
 
 logger.info("Sample records:")
-insights_df.select("insights_id", "insights_name", "url", "time").show(5, truncate=60)
+insights_df.select("insights_id", "insights_name", "url", "published_date").show(5, truncate=60)
 
 # COMMAND ----------
 # Data Statistics
