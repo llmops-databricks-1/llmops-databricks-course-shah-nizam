@@ -1,0 +1,23 @@
+resources:
+  jobs:
+    aon_insights_data_ingestion_job:
+      name: aon_insights_data_ingestion
+      tags:
+        project_name: "aon-insights"
+
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "4"
+            dependencies:
+              - ../dist/*.whl
+
+      tasks:
+        - task_key: aon_insights_data_ingestion
+          environment_key: default
+          notebook_task:
+            notebook_path: ../notebooks/1.3_aon_insights_data_ingestion.py
+            base_parameters:
+              env: ${bundle.target}
+              git_sha: "${var.git_sha}"
+              run_id: "{{job.run_id}}"

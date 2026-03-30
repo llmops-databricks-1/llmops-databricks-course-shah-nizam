@@ -1,7 +1,7 @@
 [project]
-name = "llmops-databricks-course-shah-nizam"
+name = "aon-insights"
 dynamic = ["version"]
-description = "llmops-databricks-course-shah-nizam - LLMOps Course on Databricks"
+description = "Shared utilities for LLMOps Course on Databricks"
 requires-python = ">=3.12, <3.13"
 dependencies = [
     "cffi==1.17.1",
@@ -23,32 +23,28 @@ dependencies = [
     "databricks-agents==1.8.2",
     "psycopg==3.3.2",
     "psycopg-pool==3.3.0",
-    "psycopg[binary]==3.3.2"
+    "psycopg[binary]==3.3.2",
+    "beautifulsoup4==4.14.3",
+    "requests>=2.32.5",
 ]
 
 [project.optional-dependencies]
 dev = ["databricks-connect>=17.0, <18",
        "ipykernel>=6.29.5, <7",
        "pip>=25.0.1, <26",
-       "pre-commit>=4.1.0, <5",
-       "claudetracing>=0.2.0, <1",]
+       "pre-commit>=4.1.0, <5"]
 
 ci = ["pre-commit>=4.1.0, <5",
       "pytest>=8.3.4, <9"]
 
-[tool.setuptools]
-include-package-data = true
-
-[tool.setuptools.package-data]
-"your_custom_package" = ["../../../project_config.yml"]
-
 [build-system]
-requires = ["setuptools>=72.0"]
+requires = [
+  "setuptools>=72.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-where = ["src"]
-include = ["your_custom_package*"]
+where =["src"]
+include = ["arxiv_curator*", "aon_insights*"]
 
 [tool.setuptools.dynamic]
 version = { file = "version.txt" }
@@ -61,6 +57,7 @@ pythonpath = ["."]
 [tool.ruff]
 line-length = 90
 
+[tool.ruff.lint]
 select = [
     "F",    # pyflakes rules
     "E",    # pycodestyle error rules
@@ -71,7 +68,7 @@ select = [
     "SIM",  # flake8-simplify rules
     "ERA",  # eradicate rules
     "C",    # pylint convention rules
-    "ANN"   # flake8-annotations rules
+    "ANN",  # flake8-annotations rules
 ]
 
 ignore = [
@@ -80,9 +77,19 @@ ignore = [
     "D213",   # multi-line-summary-second-line
     "C901",   # too complex
     "ERA001", # commented out code
-    "ANN204",
-    "ANN102",
-    "ANN101"
+    "ANN204", # Missing return type annotation for special method
+]
+
+[tool.ruff.lint.per-file-ignores]
+"notebooks/*.py" = [
+    "E501",   # Line too long — MAGIC markdown lines can't be wrapped
+    "E402",   # Module import not at top — notebook cells are separate blocks
+    "F821",   # Undefined name — Databricks builtins (display, dbutils, spark)
+    "ANN",    # Missing type annotations — notebook code is exploratory
+    "B905",   # zip() without strict= — not critical in notebooks
+]
+"tests/*.py" = [
+    "ANN",    # Missing type annotations — test utility scripts
 ]
 
 [tool.ruff.format]
